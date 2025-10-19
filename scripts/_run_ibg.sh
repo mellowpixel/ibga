@@ -504,6 +504,139 @@ function __maintenance_handle_relogin_warning {
 }
 
 
+function __maintenance_handle_auto_restart_warning {
+    # Try multiple dialog detection approaches
+    local DIALOG_FOUND=0
+    
+    # First try: Look for any dialog with "IBKR Gateway" title
+    local JAUTO_ARGS="list_ui_components?window_type=dialog&window_title=IBKR Gateway"
+    local DIALOGS=$(_call_jauto "$JAUTO_ARGS")
+    if [ "$DIALOGS" != "none" ]; then
+        DIALOG_FOUND=1
+        _info "  - found IBKR Gateway dialog, checking content...\n"
+    else
+        # Second try: Look for any dialog with "IB Gateway" title  
+        JAUTO_ARGS="list_ui_components?window_type=dialog&window_title=IB Gateway"
+        DIALOGS=$(_call_jauto "$JAUTO_ARGS")
+        if [ "$DIALOGS" != "none" ]; then
+            DIALOG_FOUND=1
+            _info "  - found IB Gateway dialog, checking content...\n"
+        else
+            # Third try: Look for any active dialog
+            JAUTO_ARGS="list_ui_components?window_type=dialog&is_active=1"
+            DIALOGS=$(_call_jauto "$JAUTO_ARGS")
+            if [ "$DIALOGS" != "none" ]; then
+                DIALOG_FOUND=1
+                _info "  - found active dialog, checking content...\n"
+            fi
+        fi
+    fi
+    
+    if [ $DIALOG_FOUND -eq 1 ]; then
+        OUTPUT=$(_call_jauto "$JAUTO_ARGS")
+        readarray -t COMPONENTS <<< "$OUTPUT"
+        local DIALOG_TEXT=''
+        local DIALOG_OK_X=0
+        local DIALOG_OK_Y=0
+        local DIALOG_TITLE=''
+        
+        for COMPONENT in "${COMPONENTS[@]}"; do
+            local -A PROPS="$(_jauto_parse_props $COMPONENT)"
+            # Try multiple component types for dialog text
+            if  [ "${PROPS['F1']}" == "javax.swing.JLabel" ] && \
+                [ ! -z "${PROPS['text']}" ]; then
+                DIALOG_TEXT+="${PROPS['text']}"
+            elif  [ "${PROPS['F1']}" == "javax.swing.JTextPane" ] && \
+                  [ ! -z "${PROPS['text']}" ]; then
+                DIALOG_TEXT+="${PROPS['text']}"
+            elif  [ "${PROPS['F1']}" == "javax.swing.JEditorPane" ] && \
+                  [ ! -z "${PROPS['text']}" ]; then
+                DIALOG_TEXT+="${PROPS['text']}"
+            elif  [ "${PROPS['F1']}" == "javax.swing.JTextArea" ] && \
+                  [ ! -z "${PROPS['text']}" ]; then
+                DIALOG_TEXT+="${PROPS['text']}"
+            fi
+            if  [ "${PROPS['F1']}" == "javax.swing.JButton" ] && \
+                [ "${PROPS['text']}" == "OK" ]; then
+                DIALOG_OK_X="${PROPS['mx']}"
+                DIALOG_OK_Y="${PROPS['my']}"
+            fi
+            if  [ "${PROPS['F1']}" == "javax.swing.JFrame" ] || \
+                [ "${PROPS['F1']}" == "javax.swing.JDialog" ]; then
+                DIALOG_TITLE="${PROPS['title']}"
+            fi
+            # Log all components for debugging
+            _info "    - component: ${PROPS['F1']} text: '${PROPS['text']}' title: '${PROPS['title']}'\n"
+        done
+        
+        _info "  - dialog title: '$DIALOG_TITLE'\n"
+        _info "  - dialog text: '$DIALOG_TEXT'\n"
+        
+        # Check if this is a two-factor authentication dialog
+        if [[ "$DIALOG_TITLE" == "Second Factor Authentication" ]]; then
+            _info "  - found two-factor authentication dialog\n"
+            # Check if we have IB_TOTP_KEY configured
+            if [ ! -z "$IB_TOTP_KEY" ]; then
+                _info "  - TOTP_KEY is configured, selecting Mobile Authenticator app\n"
+                # Find the list component and use keyboard navigation to select Mobile Authenticator app
+                local LIST_FOUND=0
+                for COMPONENT in "${COMPONENTS[@]}"; do
+                    local -A PROPS="$(_jauto_parse_props $COMPONENT)"
+                    if  [ "${PROPS['F1']}" == "javax.swing.JList" ]; then
+                        _info "  - found JList, clicking on it first\n"
+                        xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
+                        sleep 0.5
+                        LIST_FOUND=1
+                        break
+                    fi
+                done
+                
+                # Now use keyboard navigation to move to Mobile Authenticator app (option 2)
+                if [ $LIST_FOUND -eq 1 ]; then
+                    _info "  - using Down arrow to select Mobile Authenticator app (option 2)\n"
+                    xdotool key Down
+                    sleep 0.5
+                    
+                    # Verify the selection by checking the dialog again
+                    _info "  - verifying selection by re-checking dialog components\n"
+                    local VERIFY_OUTPUT=$(_call_jauto "$JAUTO_ARGS")
+                    readarray -t VERIFY_COMPONENTS <<< "$VERIFY_OUTPUT"
+                    for VERIFY_COMPONENT in "${VERIFY_COMPONENTS[@]}"; do
+                        local -A VERIFY_PROPS="$(_jauto_parse_props $VERIFY_COMPONENT)"
+                        if  [ "${VERIFY_PROPS['F1']}" == "javax.swing.JList(row)" ] && \
+                            [ "${VERIFY_PROPS['selected']}" == "y" ]; then
+                            _info "  - currently selected: '${VERIFY_PROPS['text']}'\n"
+                            break
+                        fi
+                    done
+                else
+                    _info "  - could not find JList component\n"
+                fi
+                # Click OK button
+                if [ $DIALOG_OK_X -gt 0 ] && [ $DIALOG_OK_Y -gt 0 ]; then
+                    _info "  - clicking OK button\n"
+                    xdotool mousemove $DIALOG_OK_X $DIALOG_OK_Y click 1
+                    sleep 1
+                fi
+            else
+                _info "  - TOTP_KEY not configured, cannot handle two-factor auth\n"
+            fi
+        elif  [ ${#DIALOG_TEXT} -gt 0 ] && \
+            ([[ "$DIALOG_TEXT" == *"restart automatically"* ]] || \
+             [[ "$DIALOG_TEXT" == *"daily basis"* ]] || \
+             [[ "$DIALOG_TEXT" == *"auto restart"* ]] || \
+             [[ "$DIALOG_TEXT" == *"elected to have"* ]]); then
+            _info "  - handle auto restart warning: $DIALOG_TEXT\n"
+            _info "    clicking OK at $DIALOG_OK_X,$DIALOG_OK_Y ...\n"
+            xdotool mousemove $DIALOG_OK_X $DIALOG_OK_Y click 1
+            sleep 0.5
+        else
+            _info "  - dialog found but doesn't match known patterns\n"
+        fi
+    fi
+}
+
+
 function __maintenance_handle_welcome {
     local OUTPUT=$(_call_jauto "list_ui_components?window_class=twslaunch.feature.welcome.")
     if [ "$OUTPUT" != "none" ]; then
@@ -543,46 +676,53 @@ function __maintenance_handle_welcome {
             fi
         fi
         # handle Mobile Authenticator app code
-        if [ ! -z "$TOTP_KEY" ]; then
-            local WINDOW_CLASS="twslaunch.jutils.aO"
-            local OUTPUT=$(_call_jauto "get_windows?window_class=$WINDOW_CLASS&window_type=dialog")
-            if [ "$OUTPUT" == "none" ]; then
-                WINDOW_CLASS="twslaunch.jutils.aQ"
-                OUTPUT=$(_call_jauto "get_windows?window_class=$WINDOW_CLASS&window_type=dialog")
-            fi
-            if [ "$OUTPUT" != "none" ]; then
-                local OUTPUT=$(_call_jauto "list_ui_components?window_class=$WINDOW_CLASS&window_type=dialog")
+        if [ ! -z "$IB_TOTP_KEY" ]; then
+            # Try multiple window classes for TOTP dialog
+            local WINDOW_CLASSES=("twslaunch.jutils.aO" "twslaunch.jutils.aQ" "twslaunch.jutils.aP")
+            local FOUND_TOTP_DIALOG=0
+            
+            for WINDOW_CLASS in "${WINDOW_CLASSES[@]}"; do
+                local OUTPUT=$(_call_jauto "get_windows?window_class=$WINDOW_CLASS&window_type=dialog")
                 if [ "$OUTPUT" != "none" ]; then
-                    _info "  - handling TOTP Mobile Authenticator\n"
-                    readarray -t COMPONENTS <<< "$OUTPUT"
-                    local RUN_OTP=0
-                    local ACCEPT_OTP=0
-                    for COMPONENT in "${COMPONENTS[@]}"; do
-                        local -A PROPS="$(_jauto_parse_props $COMPONENT)"
-                        if  [ "${PROPS['F1']}" == "javax.swing.JLabel" ] && \
-                            [[ "${PROPS['text']}" == *"Enter"* ]]; then
-                            RUN_OTP=1
-                            _info "    TOTP form identified\n"
-                        fi
-                        if  [ "${PROPS['F1']}" == "javax.swing.JTextField" ] && \
-                            [ "${PROPS['editable']}" == "y" ] && \
-                            [ "$RUN_OTP" == 1 ]; then
-                            xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
-                            TOTP_ANSWER=$(oathtool --totp -b "$TOTP_KEY")
-                            sleep 0.25
-                            xdotool type $TOTP_ANSWER
-                            _info "    TOTP answer entered\n"
-                            sleep 0.25
-                            ACCEPT_OTP=1
-                        fi
-                        if  [ "${PROPS['F1']}" == "javax.swing.JButton" ] && \
-                            [ "${PROPS['text']}" == "OK" ] &&
-                            [ "$ACCEPT_OTP" == 1 ]; then
-                            xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
-                            _info "    TOTP OK clicked\n"
-                        fi
-                    done
+                    FOUND_TOTP_DIALOG=1
+                    local OUTPUT=$(_call_jauto "list_ui_components?window_class=$WINDOW_CLASS&window_type=dialog")
+                    if [ "$OUTPUT" != "none" ]; then
+                        _info "  - handling TOTP Mobile Authenticator (class: $WINDOW_CLASS)\n"
+                        readarray -t COMPONENTS <<< "$OUTPUT"
+                        local RUN_OTP=0
+                        local ACCEPT_OTP=0
+                        for COMPONENT in "${COMPONENTS[@]}"; do
+                            local -A PROPS="$(_jauto_parse_props $COMPONENT)"
+                            if  [ "${PROPS['F1']}" == "javax.swing.JLabel" ] && \
+                                [[ "${PROPS['text']}" == *"Enter"* ]]; then
+                                RUN_OTP=1
+                                _info "    TOTP form identified\n"
+                            fi
+                            if  [ "${PROPS['F1']}" == "javax.swing.JTextField" ] && \
+                                [ "${PROPS['editable']}" == "y" ] && \
+                                [ "$RUN_OTP" == 1 ]; then
+                                xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
+                                TOTP_ANSWER=$(oathtool --totp -b "$IB_TOTP_KEY")
+                                sleep 0.25
+                                xdotool type $TOTP_ANSWER
+                                _info "    TOTP answer entered: $TOTP_ANSWER\n"
+                                sleep 0.25
+                                ACCEPT_OTP=1
+                            fi
+                            if  [ "${PROPS['F1']}" == "javax.swing.JButton" ] && \
+                                [ "${PROPS['text']}" == "OK" ] &&
+                                [ "$ACCEPT_OTP" == 1 ]; then
+                                xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
+                                _info "    TOTP OK clicked\n"
+                            fi
+                        done
+                        break
+                    fi
                 fi
+            done
+            
+            if [ $FOUND_TOTP_DIALOG -eq 0 ]; then
+                _info "  - no TOTP dialog found yet, will keep checking\n"
             fi
         fi
         # handle two-factor authentication
@@ -590,9 +730,9 @@ function __maintenance_handle_welcome {
         if [ "$OUTPUT" != "none" ]; then
             _err "!!! IB Gateway is waiting for two-factor authentication !!!\n"
         fi
-        if [ "$IB_PREFER_IBKEY" == "true" ] || [ ! -z "$TOTP_KEY" ]; then
+        if [ "$IB_PREFER_IBKEY" == "true" ] || [ ! -z "$IB_TOTP_KEY" ]; then
             local DEVICE_TO_CLICK=" IB Key"
-            if [ ! -z "$TOTP_KEY" ]; then
+            if [ ! -z "$IB_TOTP_KEY" ]; then
                 DEVICE_TO_CLICK=" Mobile Authenticator app"
             fi
             local OUTPUT=$(_call_jauto "list_ui_components?window_class=twslaunch.jauthentication&window_type=dialog")
@@ -743,13 +883,15 @@ function __maintenance_check_options {
                         sleep 0.25
                     fi
             elif    [ "${PROPS['F1']}" == "javax.swing.JRadioButton" ] && \
-                    [ "${PROPS['text']}" == "Auto restart" ] && \
-                    [ "${PROPS['selected']}" != "y" ]; then
-                    # stick to shutdown instead of restart
-                    _info "  - option check, clicking Auto restart ...\n"
-                    SETTINGS_CHANGED=1
-                    xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
-                    sleep 0.25
+                    [ "${PROPS['text']}" == "Auto restart" ]; then
+                    if [ "${PROPS['selected']}" != "y" ]; then
+                        _info "  - option check, clicking Auto restart ...\n"
+                        SETTINGS_CHANGED=1
+                        xdotool mousemove ${PROPS["mx"]} ${PROPS["my"]} click 1
+                        sleep 0.25
+                    else
+                        _info "  - option check, Auto restart already selected ...\n"
+                    fi
             fi
         done
     fi
@@ -839,7 +981,10 @@ function __maintenance_check_options {
         _info "  - option check, confirming settings change ...\n"
         xdotool mousemove $APPLY_X $APPLY_Y click 1
         __maintenance_handle_general_warning
+        __maintenance_handle_auto_restart_warning
         xdotool mousemove $OK_X $OK_Y click 1
+        sleep 1
+        __maintenance_handle_auto_restart_warning
     else
         _info "  - option check, no settings change necessary.\n"
         xdotool mousemove $CANCEL_X $CANCEL_Y click 1
@@ -923,6 +1068,7 @@ function _maintenance_cycle {
             sleep 2
         fi
         __maintenance_handle_relogin_warning
+        __maintenance_handle_auto_restart_warning
     done
 }
 

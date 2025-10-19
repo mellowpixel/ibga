@@ -1,2 +1,32 @@
-._.DS_Store
+# Git
+.git
+.gitignore
 
+# Documentation
+README.md
+DEPLOYMENT.md
+*.md
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test files
+test_connection.py
+requirements_test.txt
+
+# Local run directories (will be created by container)
+run/

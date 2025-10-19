@@ -1,0 +1,26 @@
+version: '2'
+services:
+  ibkr-gateway:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: ibga:latest
+    restart: unless-stopped
+    environment:
+      - TERM=xterm
+      - IB_USERNAME=${IB_USERNAME}
+      - IB_PASSWORD=${IB_PASSWORD}
+      - IB_TOTP_KEY=${IB_TOTP_KEY}
+      - IB_REGION=Europe
+      - IB_TIMEZONE=Europe/Dublin
+      - IB_LOGINTAB=IB API
+      - IB_LOGINTYPE=Live Trading
+      - IB_LOGOFF=11:55 PM
+      - IB_APILOG=detail
+      - IB_LOGLEVEL=Error
+    volumes:
+      - ./run/program:/home/ibg
+      - ./run/settings:/home/ibg_settings
+    ports:
+      - "15800:5800"
+      - "4000:4000"

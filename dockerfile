@@ -26,7 +26,7 @@ RUN gcc show_text.c -O2 -lX11 -o show_text
 FROM debian:bookworm-slim
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl sudo ed xvfb x11vnc x11-utils xdotool socat python3-websockify procps xfonts-scalable tzdata oathtool && \
+    apt-get install -y --no-install-recommends curl sudo ed xvfb x11vnc x11-utils xdotool socat python3-websockify procps xfonts-scalable tzdata oathtool dos2unix && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd -ms /bin/bash -u 2000 ibg && \
@@ -41,9 +41,10 @@ WORKDIR /home/ibg
 COPY --from=util_build /tmp/utils/show_text /bin
 COPY --from=jauto_build /tmp/jauto_build/jauto.so /opt
 ADD scripts /opt/ibga/
-RUN sudo chmod a+rx /bin/show_text && \
+RUN sudo dos2unix /opt/ibga/* && \
+    sudo chmod a+rx /bin/show_text && \
     sudo chmod a+rx /opt/jauto.so && \
     sudo chmod a+rx /opt/ibga/*
 EXPOSE 4000/tcp
 EXPOSE 5800/tcp
-ENTRYPOINT /opt/ibga/manager.sh
+ENTRYPOINT ["/opt/ibga/manager.sh"]
